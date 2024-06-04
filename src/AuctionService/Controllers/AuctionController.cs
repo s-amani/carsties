@@ -2,6 +2,9 @@
 using AuctionService.DTOs;
 using AuctionService.Entities;
 using AutoMapper;
+using AutoMapper.QueryableExtensions;
+using Contracts;
+using MassTransit;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,23 +15,30 @@ namespace AuctionService.Controller;
 public class AuctionController : ControllerBase
 {
     private readonly IMapper _mapper;
+    private readonly IPublishEndpoint _publishEndpoint;
     private readonly AuctionDbContext _dbContext;
 
-    public AuctionController(AuctionDbContext dbContext, IMapper mapper)
+    public AuctionController(
+        AuctionDbContext dbContext,
+        IPublishEndpoint publishEndpoint,
+        IMapper mapper)
     {
         _mapper = mapper;
+        _publishEndpoint = publishEndpoint;
         _dbContext = dbContext;
     }
 
     [HttpGet]
-    public async Task<ActionResult<List<AuctionDTO>>> Get()
+    public async Task<ActionResult<List<AuctionDTO>>> Get(string date)
     {
-        var auctions = await _dbContext.Auctions
-            .Include(x => x.Item)
-            .OrderBy(x => x.Item.Make)
-            .ToListAsync();
+        var query = _dbContext.Auctions.OrderBy(x => x.Item.Make).AsQueryable();
 
-        return _mapper.Map<List<AuctionDTO>>(auctions);
+        if (!string.IsNullOrEmpty(date))
+        {
+            query = query.Where(x => x.UpdatedAt.CompareTo(DateTime.Parse(date).ToUniversalTime()) > 0);
+        }
+
+        return await query.ProjectTo<AuctionDTO>(_mapper.ConfigurationProvider).ToListAsync();
     }
 
     [HttpGet("{id}")]
@@ -47,6 +57,10 @@ public class AuctionController : ControllerBase
         auction.Seller = "Saber";
 
         _dbContext.Add(auction);
+
+        var newAuction = _mapper.Map<AuctionDTO>(auction);
+
+        await _publishEndpoint.Publish(_mapper.Map<AuctionCreated>(newAuction));
 
         var result = await _dbContext.SaveChangesAsync() > 0;
 
@@ -77,6 +91,7 @@ public class AuctionController : ControllerBase
         return Ok();
     }
 
+    [HttpDelete("{id}")]
     public async Task<ActionResult> Delete(Guid id)
     {
         var auction = await _dbContext.Auctions.Include(x => x.Item).FirstOrDefaultAsync(x => x.Id == id);
@@ -85,6 +100,8 @@ public class AuctionController : ControllerBase
             return NotFound();
 
         _dbContext.Auctions.Remove(auction);
+
+        await _publishEndpoint.Publish(_mapper.Map<AuctionDeleted>(new AuctionDeleted { Id = id.ToString() }));
 
         var result = await _dbContext.SaveChangesAsync() > 0;
 
